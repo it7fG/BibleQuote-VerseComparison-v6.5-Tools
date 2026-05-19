@@ -304,4 +304,3 @@ This repository contains only companion utilities for BibleQuote 6.5, not the pr
 ### License
 
 Code and documentation in this repository are under the [MIT License](./LICENSE). The license covers only files in this repository, not BibleQuote and not the modules.
-Ушло в Гитхаб
