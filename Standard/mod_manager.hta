@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html>
+<head>
+<HTA:APPLICATION
+    ID="bqModMgr"
+    APPLICATIONNAME="BQ ModManager"
+    BORDER="thick"
+    CAPTION="yes"
+    ICON="compare.ico"
+    MAXIMIZEBUTTON="yes"
+    MINIMIZEBUTTON="yes"
+    SCROLL="yes"
+    SINGLEINSTANCE="yes"
+    SYSMENU="yes"
+    WINDOWSTATE="normal"
+    CONTEXTMENU="yes"
+    SELECTION="yes"
+    INNERBORDER="no"
+    NAVIGABLE="yes"
+/>
+<meta http-equiv="x-ua-compatible" content="ie=edge">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>Менеджер модулей — BibleQuote</title>
+<style>
+html, body { margin:0; padding:0; font-family:"Segoe UI", Tahoma, Arial, sans-serif; font-size:13px; background:#fff; color:#1a1a1a; }
+#top { position:sticky; top:0; padding:8px 12px; background:#eef2f7; border-bottom:1px solid #b8c2cf; z-index:10; }
+#top .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:3px 0; }
+#top input[type=text], #top select, #top button { padding:4px 8px; font-size:13px; font-family:inherit; }
+#top button { cursor:pointer; }
+#status { margin-left:auto; color:#555; font-style:italic; }
+#summary { padding:6px 12px; background:#f9fafb; border-bottom:1px solid #e1e5ea; font-size:12px; color:#666; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { padding:6px 10px; text-align:left; border-bottom:1px solid #eee; vertical-align:top; }
+th { background:#f4f6f9; position:sticky; top:80px; cursor:pointer; user-select:none; }
+th:hover { background:#e9edf3; }
+tr:hover { background:#fafbfc; }
+.lang-rus { color:#0a5; font-weight:bold; }
+.lang-ukr { color:#06b; font-weight:bold; }
+.lang-eng { color:#a05; font-weight:bold; }
+.lang-other { color:#888; }
+.type-bible { background:#e8f5e9; padding:1px 5px; border-radius:3px; font-size:11px; }
+.type-strong { background:#fff3e0; padding:1px 5px; border-radius:3px; font-size:11px; }
+.type-comm { background:#e3f2fd; padding:1px 5px; border-radius:3px; font-size:11px; }
+.type-unknown { background:#fafafa; padding:1px 5px; border-radius:3px; font-size:11px; color:#999; }
+.folder { font-family:Consolas, "Lucida Console", monospace; color:#666; font-size:12px; }
+.actions button { padding:2px 8px; font-size:11px; margin-right:4px; }
+.btn-del { background:#fee; border:1px solid #c66; color:#900; }
+.btn-del:hover { background:#fdd; }
+.btn-open { background:#eef; border:1px solid #66c; color:#009; }
+.btn-open:hover { background:#dde; }
+#log { padding:10px 12px; background:#fff8dc; border-top:1px solid #ddd; font-family:Consolas, monospace; font-size:12px; max-height:140px; overflow:auto; white-space:pre-wrap; display:none; }
+</style>
+</head>
+<body>
+
+<div id="top">
+    <div class="row">
+        <strong>Менеджер модулей</strong>
+        <input type="text" id="filter" placeholder="Фильтр (имя, папка, краткое)" style="width:280px" oninput="render()">
+        <select id="langFilter" onchange="render()">
+            <option value="">Все языки</option>
+            <option value="rus">Русский</option>
+            <option value="ukr">Українська</option>
+            <option value="eng">English</option>
+            <option value="other">Другие</option>
+        </select>
+        <select id="typeFilter" onchange="render()">
+            <option value="">Все типы</option>
+            <option value="bible">Только Библии</option>
+            <option value="strong">Со Стронгом</option>
+            <option value="comm">Комментарии</option>
+            <option value="unknown">Без типа</option>
+        </select>
+        <button onclick="rescan()">↻ Обновить</button>
+        <button onclick="openBibleBooks()">📂 Папка модулей</button>
+        <button onclick="addModule()">➕ Добавить...</button>
+        <button onclick="runReset()">🧹 Сбросить состояние</button>
+        <button onclick="openStateDir()">� Папка состояния</button>
+        <button onclick="toggleLog()">📋 Лог</button>
+        <span id="status">Загрузка...</span>
+    </div>
+</div>
+<div id="summary"></div>
+<table id="grid">
+    <thead>
+        <tr>
+            <th onclick="sortBy('name')">Название</th>
+            <th onclick="sortBy('short')">Сокр.</th>
+            <th onclick="sortBy('lang')">Язык</th>
+            <th onclick="sortBy('type')">Тип</th>
+            <th onclick="sortBy('folder')">Папка</th>
+            <th onclick="sortBy('books')">Книг</th>
+            <th>Действия</th>
+        </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+</table>
+<div id="log"></div>
+
+<script language="JavaScript">
+var fso = new ActiveXObject("Scripting.FileSystemObject");
+var shell = new ActiveXObject("Shell.Application");
+var wsh = new ActiveXObject("WScript.Shell");
+
+function getAppDir() {
+    var p = unescape(location.pathname);
+    if (p.charAt(0) === '/') p = p.substring(1);
+    p = p.replace(/\//g, '\\');
+    return p.substring(0, p.lastIndexOf('\\'));
+}
+var APP_DIR = getAppDir();
+var MODULES_DIR = APP_DIR + "\\Resources\\BibleBooks";
+var USER_NAME = (function () {
+    try { return new ActiveXObject("WScript.Network").UserName; } catch(e) {}
+    try { return wsh.ExpandEnvironmentStrings("%USERNAME%"); } catch(e2) {}
+    return "_default";
+})();
+// Standard (non-portable) BibleQuote 6.5: BQ stores state inside its install folder
+// (`<APP>\users\<USER>\`), but Windows redirects writes from Program Files to
+// VirtualStore for non-admin users. So real state may live in EITHER place.
+// We check both whenever we need to read/clear state.
+function getBQStateBases() {
+    var bases = [];
+    try {
+        var local = wsh.ExpandEnvironmentStrings("%LOCALAPPDATA%");
+        var rel = APP_DIR.replace(/^[A-Za-z]:\\?/, "");
+        bases.push(local + "\\VirtualStore\\" + rel);
+    } catch (e) {}
+    bases.push(APP_DIR);
+    return bases;
+}
+function getBQStateLocations() {
+    var bases = getBQStateBases();
+    var out = [];
+    for (var i = 0; i < bases.length; i++) {
+        var b = bases[i];
+        out.push({
+            base: b,
+            usersDir: b + "\\users\\" + USER_NAME,
+            sharedUsersDir: b + "\\users",
+            exists: fso.FolderExists(b + "\\users\\" + USER_NAME)
+        });
+    }
+    return out;
+}
+function primaryBQLocation() {
+    var locs = getBQStateLocations();
+    for (var i = 0; i < locs.length; i++) if (locs[i].exists) return locs[i];
+    return locs[0];
+}
+var USER_DIR = primaryBQLocation().usersDir; // for log display only
+
+var MODULES = [];
+var SORT_BY = "name";
+var SORT_ASC = true;
+
+function log(msg) {
+    var el = document.getElementById("log");
+    el.innerText += msg + "\n";
+    el.scrollTop = el.scrollHeight;
+}
+function toggleLog() {
+    var el = document.getElementById("log");
+    el.style.display = (el.style.display === "none" || !el.style.display) ? "block" : "none";
+}
+
+// --- File read with encoding detection ---
+function readWithCharset(path, charset) {
+    try {
+        var s = new ActiveXObject("ADODB.Stream");
+        s.Type = 2; s.Charset = charset; s.Open();
+        s.LoadFromFile(path);
+        var t = s.ReadText(); s.Close();
+        return t;
+    } catch (e) { return null; }
+}
+function readIni(path) {
+    if (!fso.FileExists(path)) return null;
+    var t = readWithCharset(path, "utf-8");
+    if (t == null || t.indexOf("\uFFFD") >= 0) {
+        var t2 = readWithCharset(path, "windows-1251");
+        if (t2 != null) t = t2;
+    }
+    return t;
+}
+function parseIni(text) {
+    var out = {};
+    if (!text) return out;
+    var lines = text.split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+        var ln = lines[i];
+        if (i === 0 && ln.charCodeAt(0) === 0xFEFF) ln = ln.substring(1);
+        var t = ln.replace(/^\s+|\s+$/g, "");
+        if (!t || t.indexOf("//") === 0 || t.charAt(0) === "[") continue;
+        var eq = t.indexOf("=");
+        if (eq < 0) continue;
+        var key = t.substring(0, eq).replace(/^\s+|\s+$/g, "");
+        var val = t.substring(eq + 1).replace(/^\s+|\s+$/g, "");
+        out[key] = val;
+    }
+    return out;
+}
+
+function guessLang(folder) {
+    var f = folder.toLowerCase();
+    if (f.indexOf("ukr") >= 0 || f.indexOf("ukrain") >= 0) return "ukr";
+    if (f.indexOf("eng") >= 0 || f.indexOf("english") >= 0 || f.indexOf("kjv") >= 0 || f.indexOf("niv") >= 0 || f.indexOf("esv") >= 0 || f.indexOf("web") >= 0) return "eng";
+    if (f.indexOf("rus") >= 0 || f.indexOf("rst") >= 0 || f.indexOf("nrt") >= 0 || f.indexOf("synod") >= 0) return "rus";
+    return "rus";
+}
+
+function countBooks(folderPath) {
+    try {
+        var folder = fso.GetFolder(folderPath);
+        var cnt = 0;
+        var fc = new Enumerator(folder.Files);
+        for (; !fc.atEnd(); fc.moveNext()) {
+            var f = fc.item();
+            var n = String(f.Name).toLowerCase();
+            if (n.indexOf(".htm") > 0 || n.indexOf(".html") > 0) cnt++;
+        }
+        return cnt;
+    } catch (e) { return 0; }
+}
+
+function scanModules() {
+    MODULES = [];
+    if (!fso.FolderExists(MODULES_DIR)) {
+        log("Папка модулей не найдена: " + MODULES_DIR);
+        return;
+    }
+    var root = fso.GetFolder(MODULES_DIR);
+    var en = new Enumerator(root.SubFolders);
+    for (; !en.atEnd(); en.moveNext()) {
+        var sub = en.item();
+        var folderName = String(sub.Name);
+        var iniPath = sub.Path + "\\bibleqt.ini";
+        var rec = {
+            folder: folderName,
+            path: sub.Path,
+            name: folderName,
+            short: "",
+            lang: "other",
+            type: "unknown",
+            books: 0
+        };
+        var txt = readIni(iniPath);
+        if (txt) {
+            var ini = parseIni(txt);
+            if (ini["BibleName"]) rec.name = ini["BibleName"];
+            if (ini["BibleShortName"]) rec.short = ini["BibleShortName"];
+            var isBible = String(ini["Bible"] || "").toUpperCase().indexOf("Y") === 0;
+            var hasStrong = String(ini["StrongNumbers"] || "").toUpperCase().indexOf("Y") === 0
+                          || String(ini["UseStrongNumbers"] || "").toUpperCase().indexOf("Y") === 0;
+            if (hasStrong) rec.type = "strong";
+            else if (isBible) rec.type = "bible";
+            else rec.type = "comm";
+            var lng = (ini["Language"] || "").toLowerCase();
+            if (lng.indexOf("rus") >= 0 || lng === "ru") rec.lang = "rus";
+            else if (lng.indexOf("ukr") >= 0 || lng === "uk") rec.lang = "ukr";
+            else if (lng.indexOf("eng") >= 0 || lng === "en") rec.lang = "eng";
+            else rec.lang = guessLang(folderName);
+        } else {
+            rec.lang = guessLang(folderName);
+        }
+        rec.books = countBooks(sub.Path);
+        MODULES.push(rec);
+    }
+    log("Найдено модулей: " + MODULES.length);
+}
+
+function htmlEscape(s) {
+    return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function langLabel(l) {
+    if (l === "rus") return '<span class="lang-rus">RUS</span>';
+    if (l === "ukr") return '<span class="lang-ukr">UKR</span>';
+    if (l === "eng") return '<span class="lang-eng">ENG</span>';
+    return '<span class="lang-other">' + htmlEscape(l) + '</span>';
+}
+function typeLabel(t) {
+    if (t === "bible") return '<span class="type-bible">Библия</span>';
+    if (t === "strong") return '<span class="type-strong">+ Стронг</span>';
+    if (t === "comm") return '<span class="type-comm">Коммент.</span>';
+    return '<span class="type-unknown">?</span>';
+}
+
+function sortBy(field) {
+    if (SORT_BY === field) SORT_ASC = !SORT_ASC;
+    else { SORT_BY = field; SORT_ASC = true; }
+    render();
+}
+
+function render() {
+    var filter = document.getElementById("filter").value.toLowerCase().replace(/^\s+|\s+$/g,"");
+    var langF = document.getElementById("langFilter").value;
+    var typeF = document.getElementById("typeFilter").value;
+
+    var rows = MODULES.slice();
+    rows.sort(function (a, b) {
+        var x = a[SORT_BY], y = b[SORT_BY];
+        if (typeof x === "string") { x = x.toLowerCase(); y = String(y).toLowerCase(); }
+        if (x < y) return SORT_ASC ? -1 : 1;
+        if (x > y) return SORT_ASC ? 1 : -1;
+        return 0;
+    });
+
+    var html = [];
+    var shown = 0;
+    for (var i = 0; i < rows.length; i++) {
+        var m = rows[i];
+        if (langF && m.lang !== langF) continue;
+        if (typeF && m.type !== typeF) continue;
+        if (filter) {
+            var hay = (m.name + " " + m.short + " " + m.folder).toLowerCase();
+            if (hay.indexOf(filter) < 0) continue;
+        }
+        shown++;
+        html.push(
+            '<tr>' +
+                '<td>' + htmlEscape(m.name) + '</td>' +
+                '<td>' + htmlEscape(m.short) + '</td>' +
+                '<td>' + langLabel(m.lang) + '</td>' +
+                '<td>' + typeLabel(m.type) + '</td>' +
+                '<td class="folder">' + htmlEscape(m.folder) + '</td>' +
+                '<td>' + m.books + '</td>' +
+                '<td class="actions">' +
+                    '<button class="btn-open" onclick="openFolder(\'' + htmlEscape(m.folder).replace(/\'/g, "\\\'") + '\')">Папка</button>' +
+                    '<button class="btn-del" onclick="deleteModule(\'' + htmlEscape(m.folder).replace(/\'/g, "\\\'") + '\')">Удалить</button>' +
+                '</td>' +
+            '</tr>'
+        );
+    }
+    document.getElementById("rows").innerHTML = html.join("");
+    document.getElementById("summary").innerText =
+        "Всего: " + MODULES.length + " модулей. Показано: " + shown +
+        ".   Папка: " + MODULES_DIR;
+    document.getElementById("status").innerText = "Готово";
+}
+
+function openBibleBooks() {
+    wsh.Run('explorer.exe "' + MODULES_DIR + '"', 1, false);
+}
+function openFolder(name) {
+    var path = MODULES_DIR + "\\" + name;
+    if (fso.FolderExists(path)) wsh.Run('explorer.exe "' + path + '"', 1, false);
+}
+
+function deleteModule(name) {
+    var path = MODULES_DIR + "\\" + name;
+    if (!fso.FolderExists(path)) { alert("Папка не найдена: " + path); return; }
+    var ok = confirm(
+        "Удалить модуль \"" + name + "\"?\n\n" +
+        "Папка будет перемещена в Корзину.\n" +
+        "BibleQuote сама пересоздаст кэш при следующем запуске."
+    );
+    if (!ok) return;
+
+    // Move to Recycle Bin via Shell verb
+    try {
+        var parent = shell.NameSpace(MODULES_DIR);
+        var item = parent.ParseName(name);
+        if (!item) { alert("Не найдено в Shell: " + name); return; }
+        item.InvokeVerb("delete");
+        log("Удалено в корзину: " + name);
+    } catch (e) {
+        // Fallback: permanent delete
+        if (!confirm("Не удалось отправить в Корзину. Удалить навсегда?")) return;
+        try { fso.DeleteFolder(path, true); log("Удалено навсегда: " + name); }
+        catch (e2) { alert("Ошибка удаления: " + e2.message); return; }
+    }
+
+    // Just rescan UI. Do NOT touch BQ state files — that breaks BQ
+    // (it shows "Can't resolve favourite module: ()" because cleared
+    // hotmodules.lst confuses TFavoriteModules.LoadModules).
+    setTimeout(function () {
+        rescan();
+        alert("Модуль удалён.");
+    }, 300);
+}
+
+function addModule() {
+    try {
+        var f = shell.BrowseForFolder(0, "Выберите папку модуля для добавления", 0, "");
+        if (!f) return;
+        var srcPath = f.Self.Path;
+        var srcName = f.Title;
+        if (!fso.FolderExists(srcPath)) { alert("Не папка."); return; }
+
+        // Verify it has bibleqt.ini (sanity check)
+        if (!fso.FileExists(srcPath + "\\bibleqt.ini")) {
+            if (!confirm("В выбранной папке нет bibleqt.ini. Всё равно скопировать?")) return;
+        }
+
+        var destPath = MODULES_DIR + "\\" + srcName;
+        if (fso.FolderExists(destPath)) {
+            alert("Модуль с таким именем уже существует: " + srcName);
+            return;
+        }
+        fso.CopyFolder(srcPath, destPath, true);
+        log("Скопирован: " + srcName);
+        rescan();
+        alert("Модуль добавлен: " + srcName);
+    } catch (e) {
+        alert("Ошибка: " + e.message);
+    }
+}
+
+function resetOneLocation(loc) {
+    var didSomething = false;
+    // 1. cached.lst is in <base>\users\ (one level above per-user dir)
+    var cachedLst = loc.sharedUsersDir + "\\cached.lst";
+    if (fso.FileExists(cachedLst)) {
+        var bakCache = cachedLst + ".bak";
+        try {
+            if (fso.FileExists(bakCache)) { fso.DeleteFile(bakCache, true); }
+            fso.MoveFile(cachedLst, bakCache);
+            log("  Кэш модулей сброшен: " + cachedLst + " -> .bak");
+            didSomething = true;
+        } catch (eC) {
+            try { fso.DeleteFile(cachedLst, true); log("  Удалён: " + cachedLst); didSomething = true; }
+            catch (eC2) { log("  Не удалось очистить cached.lst: " + eC2.message); }
+        }
+    }
+    // 2. Per-user state files
+    if (!fso.FolderExists(loc.usersDir)) return didSomething;
+    var toClear = ["viewtabs.cfg", "bibleqt_history.ini", "hotmodules.lst", "mru.lst"];
+    for (var i = 0; i < toClear.length; i++) {
+        var p = loc.usersDir + "\\" + toClear[i];
+        if (fso.FileExists(p)) {
+            var bak = p + ".bak";
+            if (!fso.FileExists(bak)) {
+                try { fso.CopyFile(p, bak, true); } catch (e) {}
+            }
+            try {
+                var s = new ActiveXObject("ADODB.Stream");
+                s.Type = 2; s.Open(); s.Charset = "unicode";
+                s.WriteText("");
+                s.SaveToFile(p, 2); s.Close();
+                log("  Очищен: " + toClear[i]);
+                didSomething = true;
+            } catch (e2) { log("  Не очищен " + toClear[i] + ": " + e2.message); }
+        }
+    }
+    // 3. bibleqt.ini — strip LastAddress
+    var iniPath = loc.usersDir + "\\bibleqt.ini";
+    if (fso.FileExists(iniPath)) {
+        var bak2 = iniPath + ".bak";
+        if (!fso.FileExists(bak2)) {
+            try { fso.CopyFile(iniPath, bak2, true); } catch (e3) {}
+        }
+        var txt = readWithCharset(iniPath, "windows-1251");
+        if (txt != null) {
+            var lines = txt.split(/\r?\n/);
+            var kept = [];
+            var removed = 0;
+            for (var k = 0; k < lines.length; k++) {
+                if (/^\s*LastAddress\s*=/i.test(lines[k])) { removed++; continue; }
+                kept.push(lines[k]);
+            }
+            if (removed > 0) {
+                try {
+                    var s2 = new ActiveXObject("ADODB.Stream");
+                    s2.Type = 2; s2.Open(); s2.Charset = "windows-1251";
+                    s2.WriteText(kept.join("\r\n"));
+                    s2.SaveToFile(iniPath, 2); s2.Close();
+                    log("  bibleqt.ini: LastAddress удалён");
+                    didSomething = true;
+                } catch (e4) { log("  bibleqt.ini не записан: " + e4.message); }
+            }
+        }
+    }
+    return didSomething;
+}
+function resetState() {
+    var locs = getBQStateLocations();
+    var touched = 0;
+    for (var li = 0; li < locs.length; li++) {
+        var loc = locs[li];
+        // Process if either the per-user dir or the shared users dir exists.
+        if (!fso.FolderExists(loc.usersDir) && !fso.FolderExists(loc.sharedUsersDir)) continue;
+        log("Сброс в: " + loc.base);
+        if (resetOneLocation(loc)) touched++;
+    }
+    if (touched === 0) {
+        log("Состояние BibleQuote не найдено ни в одной из ожидаемых папок:");
+        for (var li2 = 0; li2 < locs.length; li2++) log("  " + locs[li2].usersDir);
+    }
+}
+
+function openStateDir() {
+    var locs = getBQStateLocations();
+    for (var i = 0; i < locs.length; i++) {
+        if (fso.FolderExists(locs[i].usersDir)) {
+            try { wsh.Run('explorer.exe "' + locs[i].usersDir + '"'); return; }
+            catch (e) { alert("Не удалось открыть: " + e.message); return; }
+        }
+    }
+    var msg = "Папка состояния BibleQuote не найдена.\n\nОжидаемые места:\n";
+    for (var j = 0; j < locs.length; j++) msg += "  " + locs[j].usersDir + "\n";
+    msg += "\nЗапустите BibleQuote хотя бы раз — она создаст папку.";
+    alert(msg);
+}
+
+function runReset() {
+    if (!confirm(
+        "Сбросить состояние BibleQuote для пользователя " + USER_NAME + "?\n\n" +
+        "Будут очищены: вкладки, история, hotmodules, LastAddress.\n" +
+        "Настройки шрифтов и окон сохранятся. Резервные копии (.bak) рядом.\n\n" +
+        "Полезно если BibleQuote крашится при запуске."
+    )) return;
+    resetState();
+    alert("Готово. Состояние сброшено.");
+}
+
+function rescan() {
+    document.getElementById("status").innerText = "Сканирую...";
+    setTimeout(function () { scanModules(); render(); }, 30);
+}
+
+window.onload = function () {
+    log("APP_DIR = " + APP_DIR);
+    log("MODULES_DIR = " + MODULES_DIR);
+    log("USER = " + USER_NAME);
+    var locs = getBQStateLocations();
+    log("Кандидаты папки состояния BibleQuote:");
+    for (var i = 0; i < locs.length; i++) {
+        log("  [" + (locs[i].exists ? "✔" : " ") + "] " + locs[i].usersDir);
+    }
+    window.resizeTo(1100, 700);
+    rescan();
+};
+</script>
+</body>
+</html>
